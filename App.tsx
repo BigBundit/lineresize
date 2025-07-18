@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import type { ImageDimensions } from './types';
 import FileDropzone from './components/FileDropzone';
 import Button from './components/Button';
@@ -21,7 +21,6 @@ const getAverageBorderColor = (img: HTMLImageElement): string => {
     canvas.height = height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     
-    // If context can't be created or image is too small, return black.
     if (!ctx || width === 0 || height === 0) {
         return 'rgb(0, 0, 0)';
     }
@@ -35,13 +34,11 @@ const getAverageBorderColor = (img: HTMLImageElement): string => {
 
         // Top and bottom edges
         for (let x = 0; x < width; x++) {
-            // Top edge pixel
             let iTop = (0 * width + x) * 4;
             r += imageData[iTop];
             g += imageData[iTop + 1];
             b += imageData[iTop + 2];
             
-            // Bottom edge pixel
             let iBottom = ((height - 1) * width + x) * 4;
             r += imageData[iBottom];
             g += imageData[iBottom + 1];
@@ -51,13 +48,11 @@ const getAverageBorderColor = (img: HTMLImageElement): string => {
 
         // Left and right edges (excluding corners already counted)
         for (let y = 1; y < height - 1; y++) {
-            // Left edge pixel
             let iLeft = (y * width + 0) * 4;
             r += imageData[iLeft];
             g += imageData[iLeft + 1];
             b += imageData[iLeft + 2];
 
-            // Right edge pixel
             let iRight = (y * width + (width - 1)) * 4;
             r += imageData[iRight];
             g += imageData[iRight + 1];
@@ -65,7 +60,7 @@ const getAverageBorderColor = (img: HTMLImageElement): string => {
         }
         count += (height - 2) * 2;
         
-        if (count === 0) { // Handles 1x1 image case
+        if (count === 0) {
              if(imageData.length >= 3) return `rgb(${imageData[0]}, ${imageData[1]}, ${imageData[2]})`;
              return 'rgb(0, 0, 0)';
         }
@@ -78,114 +73,150 @@ const getAverageBorderColor = (img: HTMLImageElement): string => {
 
     } catch (e) {
         console.error("Error getting image data for border color:", e);
-        return 'rgb(0, 0, 0)'; // Fallback to black on error
+        return 'rgb(0, 0, 0)';
     }
 };
-
 
 const App: React.FC = () => {
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [originalSrc, setOriginalSrc] = useState<string | null>(null);
-  const [resizedSrc, setResizedSrc] = useState<string | null>(null);
   const [originalDimensions, setOriginalDimensions] = useState<ImageDimensions | null>(null);
-  const [resizedDimensions, setResizedDimensions] = useState<ImageDimensions | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  
+  // State for interactive canvas
+  const [zoom, setZoom] = useState<number>(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Refs for managing canvas and interaction state
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const initialFit = useRef<{ scale: number; x: number; y: number }>({ scale: 1, x: 0, y: 0 });
+  const isDragging = useRef<boolean>(false);
+  const dragStart = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const lastPan = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   const resetState = useCallback(() => {
     setImageFile(null);
-    setOriginalSrc(null);
-    setResizedSrc(null);
     setOriginalDimensions(null);
-    setResizedDimensions(null);
     setError(null);
     setIsProcessing(false);
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    imageRef.current = null;
     if (originalSrc) {
       URL.revokeObjectURL(originalSrc);
     }
+    setOriginalSrc(null);
   }, [originalSrc]);
+  
+  // Effect to load the image and set initial state
+  useEffect(() => {
+    if (!imageFile) return;
 
-  const processImage = useCallback((file: File) => {
     setIsProcessing(true);
     setError(null);
-    setResizedSrc(null);
 
     const reader = new FileReader();
     reader.onload = (e) => {
       const imgSrc = e.target?.result as string;
-      setOriginalSrc(imgSrc);
       
       const img = new Image();
       img.onload = () => {
+        imageRef.current = img;
         setOriginalDimensions({ width: img.width, height: img.height });
-        setResizedDimensions({ width: TARGET_WIDTH, height: TARGET_HEIGHT });
-
-        const canvas = document.createElement('canvas');
-        canvas.width = TARGET_WIDTH;
-        canvas.height = TARGET_HEIGHT;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-            setError("ไม่สามารถสร้าง Canvas context ได้");
-            setIsProcessing(false);
-            return;
-        }
         
-        const backgroundColor = getAverageBorderColor(img);
-
-        // Fill background with the determined average color
-        ctx.fillStyle = backgroundColor;
-        ctx.fillRect(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-
-        // Calculate dimensions to fit image within canvas while maintaining aspect ratio
         const scaleFactor = Math.min(TARGET_WIDTH / img.width, TARGET_HEIGHT / img.height);
-        const newWidth = img.width * scaleFactor;
-        const newHeight = img.height * scaleFactor;
-
-        // Calculate position to center the image
-        const dx = (TARGET_WIDTH - newWidth) / 2;
-        const dy = (TARGET_HEIGHT - newHeight) / 2;
-
-        // Draw the resized image onto the canvas
-        ctx.drawImage(img, dx, dy, newWidth, newHeight);
+        initialFit.current = {
+            scale: scaleFactor,
+            x: (TARGET_WIDTH - img.width * scaleFactor) / 2,
+            y: (TARGET_HEIGHT - img.height * scaleFactor) / 2,
+        };
         
-        const resizedDataUrl = canvas.toDataURL('image/jpeg', 0.9);
-        setResizedSrc(resizedDataUrl);
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+        setOriginalSrc(imgSrc); // Set src here to trigger redraw effect
         setIsProcessing(false);
       };
-      
       img.onerror = () => {
         setError("ไม่สามารถโหลดไฟล์รูปภาพได้ อาจเป็นไฟล์ที่เสียหายหรือไม่ใช่รูปภาพ");
         setIsProcessing(false);
       };
-
       img.src = imgSrc;
     };
-    
     reader.onerror = () => {
         setError("เกิดข้อผิดพลาดในการอ่านไฟล์");
         setIsProcessing(false);
     };
-
-    reader.readAsDataURL(file);
-  }, []);
-  
-  useEffect(() => {
-    if (imageFile) {
-      processImage(imageFile);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    reader.readAsDataURL(imageFile);
   }, [imageFile]);
 
 
-  const handleFileSelect = (file: File) => {
-    resetState();
-    setImageFile(file);
-  };
+  // Effect to redraw canvas when image, zoom, or pan changes
+  useEffect(() => {
+    const img = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!img || !canvas || !originalSrc) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const currentScale = initialFit.current.scale * zoom;
+    const scaledWidth = img.width * currentScale;
+    const scaledHeight = img.height * currentScale;
+
+    const maxPanX = Math.max(0, (scaledWidth - TARGET_WIDTH) / 2);
+    const maxPanY = Math.max(0, (scaledHeight - TARGET_HEIGHT) / 2);
+    
+    const clampedPan = {
+        x: Math.max(-maxPanX, Math.min(maxPanX, pan.x)),
+        y: Math.max(-maxPanY, Math.min(maxPanY, pan.y)),
+    };
+    
+    if (clampedPan.x !== pan.x || clampedPan.y !== pan.y) {
+        setPan(clampedPan);
+        return; // Let the re-render with new pan value handle the drawing
+    }
+
+    const backgroundColor = getAverageBorderColor(img);
+    ctx.fillStyle = backgroundColor;
+    ctx.fillRect(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+
+    const drawX = initialFit.current.x + clampedPan.x - (scaledWidth - initialFit.current.scale * img.width) / 2;
+    const drawY = initialFit.current.y + clampedPan.y - (scaledHeight - initialFit.current.scale * img.height) / 2;
+
+    ctx.drawImage(img, drawX, drawY, scaledWidth, scaledHeight);
+
+  }, [zoom, pan, originalSrc]);
+
 
   const handleDownload = () => {
-    if (!resizedSrc || !imageFile) return;
+    const canvas = canvasRef.current;
+    const img = imageRef.current;
+    if (!canvas || !img || !imageFile) return;
+
+    // Use a temporary canvas to draw the full-quality image for download
+    const downloadCanvas = document.createElement('canvas');
+    downloadCanvas.width = TARGET_WIDTH;
+    downloadCanvas.height = TARGET_HEIGHT;
+    const ctx = downloadCanvas.getContext('2d');
+    if (!ctx) return;
+    
+    // Perform the same drawing operations as the preview
+    const backgroundColor = getAverageBorderColor(img);
+    ctx.fillStyle = backgroundColor;
+    ctx.fillRect(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+
+    const currentScale = initialFit.current.scale * zoom;
+    const scaledWidth = img.width * currentScale;
+    const scaledHeight = img.height * currentScale;
+    const drawX = initialFit.current.x + pan.x - (scaledWidth - initialFit.current.scale * img.width) / 2;
+    const drawY = initialFit.current.y + pan.y - (scaledHeight - initialFit.current.scale * img.height) / 2;
+
+    ctx.drawImage(img, drawX, drawY, scaledWidth, scaledHeight);
+
     const link = document.createElement('a');
-    link.href = resizedSrc;
+    link.href = downloadCanvas.toDataURL('image/jpeg', 1.0);
     const nameWithoutExtension = imageFile.name.split('.').slice(0, -1).join('.');
     link.download = `${nameWithoutExtension}_${TARGET_WIDTH}x${TARGET_HEIGHT}.jpg`;
     document.body.appendChild(link);
@@ -193,10 +224,15 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   };
 
+  const handleFileSelect = (file: File) => {
+    resetState();
+    setImageFile(file);
+  };
+
   const renderContent = () => {
     if (isProcessing) {
       return (
-        <div className="flex flex-col items-center justify-center gap-4 text-center">
+        <div className="flex flex-col items-center justify-center gap-4 text-center h-96">
           <Spinner />
           <p className="text-lg font-medium text-slate-300">กำลังประมวลผลรูปภาพ...</p>
           <p className="text-sm text-slate-400">โปรดรอสักครู่</p>
@@ -217,12 +253,18 @@ const App: React.FC = () => {
       );
     }
 
-    if (resizedSrc && originalSrc) {
+    if (originalSrc) {
       return (
         <div className="w-full flex flex-col gap-8">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
             <ImagePreview title="ต้นฉบับ" src={originalSrc} dimensions={originalDimensions} />
-            <ImagePreview title="ปรับขนาดแล้ว" src={resizedSrc} dimensions={resizedDimensions} isSuccess={true} />
+            <InteractiveCanvas
+              zoom={zoom}
+              setZoom={setZoom}
+              pan={pan}
+              setPan={setPan}
+              canvasRef={canvasRef}
+            />
           </div>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Button onClick={handleDownload} Icon={DownloadIcon}>
@@ -244,8 +286,8 @@ const App: React.FC = () => {
       <main className="w-full max-w-7xl mx-auto flex flex-col items-center gap-6">
         <header className="text-center">
             <h1 className="text-4xl sm:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-cyan-300">เครื่องมือปรับขนาดรูปภาพ</h1>
-            <p className="mt-3 text-lg text-slate-400 max-w-2xl">
-              ปรับขนาดรูปภาพให้พอดีกับกรอบขนาด <strong className="text-white">{TARGET_WIDTH} x {TARGET_HEIGHT} พิกเซล</strong> โดยคงสัดส่วนเดิมและเพิ่มพื้นที่ว่างโดยใช้สีเฉลี่ยจากขอบของรูปภาพ
+            <p className="mt-3 text-lg text-slate-400 max-w-3xl">
+              ปรับขนาดรูปภาพให้พอดีกับกรอบขนาด <strong className="text-white">{TARGET_WIDTH} x {TARGET_HEIGHT} พิกเซล</strong> คุณสามารถลากเพื่อย้ายและซูมภาพก่อนบันทึกได้
             </p>
         </header>
         <div className="w-full bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-6 sm:p-8 mt-4 shadow-2xl shadow-slate-900/50">
@@ -263,12 +305,10 @@ interface ImagePreviewProps {
     title: string;
     src: string;
     dimensions: ImageDimensions | null;
-    isSuccess?: boolean;
 }
-
-const ImagePreview: React.FC<ImagePreviewProps> = ({ title, src, dimensions, isSuccess = false }) => (
+const ImagePreview: React.FC<ImagePreviewProps> = ({ title, src, dimensions }) => (
     <div className="flex flex-col gap-3">
-        <h3 className={`text-lg font-semibold ${isSuccess ? 'text-sky-400' : 'text-slate-300'}`}>{title}</h3>
+        <h3 className="text-lg font-semibold text-slate-300">{title}</h3>
         <div className="bg-slate-900 p-2 rounded-lg border border-slate-700">
             <img src={src} alt={title} className="w-full h-auto rounded-md object-contain" />
         </div>
@@ -280,5 +320,84 @@ const ImagePreview: React.FC<ImagePreviewProps> = ({ title, src, dimensions, isS
     </div>
 );
 
+interface InteractiveCanvasProps {
+  zoom: number;
+  setZoom: React.Dispatch<React.SetStateAction<number>>;
+  pan: { x: number; y: number };
+  setPan: React.Dispatch<React.SetStateAction<{ x: number, y: number }>>;
+  canvasRef: React.RefObject<HTMLCanvasElement>;
+}
+const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({ zoom, setZoom, pan, setPan, canvasRef }) => {
+  const isDragging = useRef<boolean>(false);
+  const dragStart = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const lastPan = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  const handleInteractionStart = (clientX: number, clientY: number) => {
+    isDragging.current = true;
+    dragStart.current = { x: clientX, y: clientY };
+    lastPan.current = pan;
+  };
+
+  const handleInteractionMove = (clientX: number, clientY: number) => {
+    if (!isDragging.current) return;
+    const dx = clientX - dragStart.current.x;
+    const dy = clientY - dragStart.current.y;
+    setPan({
+      x: lastPan.current.x + dx,
+      y: lastPan.current.y + dy,
+    });
+  };
+
+  const handleInteractionEnd = () => {
+    isDragging.current = false;
+  };
+  
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const zoomAmount = e.deltaY * -0.01;
+    setZoom(prevZoom => Math.max(1, Math.min(prevZoom + zoomAmount, 10)));
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <h3 className="text-lg font-semibold text-sky-400">ปรับขนาดแล้ว</h3>
+      <div 
+        className="bg-slate-900 p-2 rounded-lg border border-slate-700 touch-none cursor-grab active:cursor-grabbing"
+        onMouseDown={(e) => handleInteractionStart(e.clientX, e.clientY)}
+        onMouseMove={(e) => handleInteractionMove(e.clientX, e.clientY)}
+        onMouseUp={handleInteractionEnd}
+        onMouseLeave={handleInteractionEnd}
+        onTouchStart={(e) => handleInteractionStart(e.touches[0].clientX, e.touches[0].clientY)}
+        onTouchMove={(e) => handleInteractionMove(e.touches[0].clientX, e.touches[0].clientY)}
+        onTouchEnd={handleInteractionEnd}
+      >
+        <canvas
+          ref={canvasRef}
+          width={TARGET_WIDTH}
+          height={TARGET_HEIGHT}
+          className="w-full h-auto rounded-md"
+          onWheel={handleWheel}
+        />
+      </div>
+      <div className="flex items-center gap-3 px-1 text-slate-400 text-sm">
+        <label htmlFor="zoom-slider" className="whitespace-nowrap">ซูม ({zoom.toFixed(1)}x)</label>
+        <input
+          id="zoom-slider"
+          type="range"
+          min="1"
+          max="10"
+          step="0.1"
+          value={zoom}
+          onChange={(e) => setZoom(Number(e.target.value))}
+          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-sky-500"
+          aria-label="Zoom slider"
+        />
+      </div>
+      <div className="text-center text-sm text-slate-400 bg-slate-800 rounded-full px-3 py-1 self-center">
+        {TARGET_WIDTH} x {TARGET_HEIGHT} px
+      </div>
+    </div>
+  );
+};
 
 export default App;
